@@ -2,6 +2,8 @@
 //
 // Copyright (C) 2012 by Salvatore Sanfilippo <antirez@gmail.com>
 //
+// HackRF support added by Kim Hein <heinstein@gmail.com>
+//
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -256,6 +258,7 @@ int modesInitHackRF(void) {
     #define HACKRF_STATUS(status, message) \
         if (status != 0) { \
             fprintf(stderr, "%s\n", message); \
+            Modes.exit = 1; \
             hackrf_close(Modes.hackrf_dev); \
             hackrf_exit(); \
             return (1); \
@@ -340,13 +343,12 @@ void rtlsdrCallback(unsigned char *buf, uint32_t len, void *ctx) {
 // We use a thread reading data in background, while the main thread
 // handles decoding and visualization of data to the user.
 //
-// The reading thread calls the RTLSDR API to read data asynchronously, and
+// The reading thread calls the HACKRF API to read data asynchronously, and
 // uses a callback to populate the data buffer.
 //
 // A Mutex is used to avoid races with the decoding thread.
 //
 int hackrfCallback(hackrf_transfer *transfer) {
-
 
     // Lock the data buffer variables before accessing them
     pthread_mutex_lock(&Modes.data_mutex);
@@ -362,40 +364,21 @@ int hackrfCallback(hackrf_transfer *transfer) {
         transfer->buffer[i] ^= (uint8_t)0x80;
     }
 
-    uint32_t transfered=0;
-    while ((Modes.pHackrfTempBuffer_left+(len-transfered)) >= MODES_ASYNC_BUF_SIZE){ /*tempbuffer + transfer->buffer is full enough*/
-        
-        // copy from pHackrfTempBuffer + transfer-> to pHackrfData
-        //copy from temp.
-        if (Modes.pHackrfTempBuffer_left>0){
-            memcpy(Modes.pHackrfData,Modes.pHackrfTempBuffer,Modes.pHackrfTempBuffer_left);
-            memcpy(Modes.pHackrfData+Modes.pHackrfTempBuffer_left,transfer->buffer,MODES_ASYNC_BUF_SIZE-Modes.pHackrfTempBuffer_left);
-            transfered=MODES_ASYNC_BUF_SIZE-Modes.pHackrfTempBuffer_left;
-            Modes.pHackrfTempBuffer_left=0;
-        } else {
-            memcpy(Modes.pHackrfData,transfer->buffer+transfered,MODES_ASYNC_BUF_SIZE);
-            transfered+=MODES_ASYNC_BUF_SIZE;
-        }
-
-        // Queue the new data
-        Modes.pData[Modes.iDataIn] = Modes.pHackrfData; //TODO: increase to multiple buffers if needed
-        Modes.iDataIn    = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn + 1);
-        Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn - Modes.iDataOut);   
-
-        if (Modes.iDataReady == 0) {
-          // Ooooops. We've just received the MODES_ASYNC_BUF_NUMBER'th outstanding buffer
-          // This means that RTLSDR is currently overwriting the MODES_ASYNC_BUF_NUMBER+1
-          // buffer, but we havent yet processed it, so we're going to lose it. There
-          // isn't much we can do to recover the lost data, but we can correct things to
-          // avoid any additional problems.
-          Modes.iDataOut   = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataOut+1);
-          Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1);   
-          Modes.iDataLost++;
-        }
+    // Queue the new data
+    Modes.pData[Modes.iDataIn] = (uint16_t *) transfer->buffer;
+    Modes.iDataIn    = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn + 1);
+    Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn - Modes.iDataOut);   
+    
+    if (Modes.iDataReady == 0) {
+       // Ooooops. We've just received the MODES_ASYNC_BUF_NUMBER'th outstanding buffer
+       // This means that RTLSDR is currently overwriting the MODES_ASYNC_BUF_NUMBER+1
+       // buffer, but we havent yet processed it, so we're going to lose it. There
+       // isn't much we can do to recover the lost data, but we can correct things to
+       // avoid any additional problems.
+       Modes.iDataOut   = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataOut+1);
+       Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1);   
+       Modes.iDataLost++;
     }
-    // copy rest to tempbuffer
-    Modes.pHackrfTempBuffer_left=len-transfered;
-    memcpy(Modes.pHackrfTempBuffer,transfer->buffer+transfered,Modes.pHackrfTempBuffer_left);
 
     // Signal to the other thread that new data is ready, and unlock
     pthread_cond_signal(&Modes.data_cond);
@@ -476,7 +459,8 @@ void *readerThreadEntryPoint(void *arg) {
             if (status != 0) { 
                 fprintf(stderr, "hackrf_start_rx failed"); 
                 hackrf_close(Modes.hackrf_dev); 
-                hackrf_exit(); 
+                hackrf_exit();
+                Modes.exit = 1; // Signal the other threads to exit. 
                 exit (1); 
             }  
         }
@@ -521,11 +505,19 @@ void showHelp(void) {
 "-----------------------------------------------------------------------------\n"
 "|                        dump1090 ModeS Receiver         Ver : " MODES_DUMP1090_VERSION " |\n"
 "-----------------------------------------------------------------------------\n"
-"--device-index <index>   Select RTL device (default: 0)\n"
 "--dev <index>            Select device type, 1=RTL-SDR, 2=HackRF (default: 1)\n"
+"--freq <hz>              Set frequency (default: 1090 Mhz)\n"
+"\n"
+"------------ RTL-SDR---------------------------------------------------------\n"
 "--gain <db>              Set gain (default: max gain. Use -10 for auto-gain)\n"
 "--enable-agc             Enable the Automatic Gain Control (default: off)\n"
-"--freq <hz>              Set frequency (default: 1090 Mhz)\n"
+"--device-index <index>   Select RTL device (default: 0)\n"
+"\n"
+"------------ HackRF----------------------------------------------------------\n"
+"--enable-amp             Enable HackRF RX/TX RF amplifier (default: off).\n"
+"--lna-gain               Set HackRF RX LNA (IF) gain, 0-40dB, 8dB steps (default: 32).\n"
+"--vga-gain               Set HackRF RX VGA (baseband) gain, 0-62dB, 2dB steps (default: 48).\n"
+"\n"
 "--ifile <filename>       Read data from file (use '-' for stdin)\n"
 "--interactive            Interactive mode refreshing data on screen\n"
 "--interactive-rows <num> Max number of rows in interactive mode (default: 15)\n"
@@ -798,20 +790,30 @@ int main(int argc, char **argv) {
     for (j = 1; j < argc; j++) {
         int more = j+1 < argc; // There are more arguments
 
-        if (!strcmp(argv[j],"--device-index") && more) {
-            Modes.dev_index = verbose_device_search(argv[++j]);
-        } else if (!strcmp(argv[j],"--dev") && more) {
+
+        if (!strcmp(argv[j],"--dev") && more) {
             char *f = argv[++j];
             switch(*f) {
                 case '1': Modes.dev_ID = MODES_DEV_RTLSDR; break;
                 case '2': Modes.dev_ID = MODES_DEV_HACKRF; break;
+                default: Modes.dev_ID = MODES_DEV_RTLSDR; break;
             }
+        } else if (!strcmp(argv[j],"--freq") && more) {
+            Modes.freq = (int) strtoll(argv[++j],NULL,10);
+        // RTL-SDR
+        } else if (!strcmp(argv[j],"--device-index") && more) {
+            Modes.dev_index = verbose_device_search(argv[++j]);
         } else if (!strcmp(argv[j],"--gain") && more) {
             Modes.gain = (int) (atof(argv[++j])*10); // Gain is in tens of DBs
         } else if (!strcmp(argv[j],"--enable-agc")) {
             Modes.enable_agc++;
-        } else if (!strcmp(argv[j],"--freq") && more) {
-            Modes.freq = (int) strtoll(argv[++j],NULL,10);
+        // Hackrf
+        } else if (!strcmp(argv[j],"--enable-amp")) {
+            Modes.enable_amp = 1;
+        } else if (!strcmp(argv[j],"--lna-gain") && more) {
+            Modes.lna_gain =  atoi(argv[++j]);
+        } else if (!strcmp(argv[j],"--vga-gain") && more) {
+            Modes.vga_gain =  atoi(argv[++j]);
         } else if (!strcmp(argv[j],"--ifile") && more) {
             Modes.filename = strdup(argv[++j]);
         } else if (!strcmp(argv[j],"--fix")) {
@@ -1023,8 +1025,15 @@ int main(int argc, char **argv) {
     }
 
     if (Modes.filename == NULL) {
-        rtlsdr_cancel_async(Modes.dev);  // Cancel rtlsdr_read_async will cause data input thread to terminate cleanly
-        rtlsdr_close(Modes.dev);
+        if (Modes.dev_ID==MODES_DEV_RTLSDR){
+            rtlsdr_cancel_async(Modes.dev);  // Cancel rtlsdr_read_async will cause data input thread to terminate cleanly
+            rtlsdr_close(Modes.dev);
+        }
+        if (Modes.dev_ID==MODES_DEV_HACKRF){
+            hackrf_stop_rx(Modes.hackrf_dev);
+            hackrf_close(Modes.hackrf_dev);
+            hackrf_exit(); 
+        }
     }
     pthread_cond_destroy(&Modes.data_cond);     // Thread cleanup
     pthread_mutex_destroy(&Modes.data_mutex);

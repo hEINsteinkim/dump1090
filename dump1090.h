@@ -85,7 +85,8 @@
 #define MODES_DEFAULT_WIDTH        1000
 #define MODES_DEFAULT_HEIGHT       700
 #define MODES_ASYNC_BUF_NUMBER     16
-#define MODES_ASYNC_BUF_SIZE       (16*16384)                 // 256k
+#define MODES_ASYNC_BUF_SIZE       (16*16384)                 // 256k OBS must not be changed as 
+                                                              // this is the fixed length from hackrf
 #define MODES_ASYNC_BUF_SAMPLES    (MODES_ASYNC_BUF_SIZE / 2) // Each sample is 2 bytes
 #define MODES_AUTO_GAIN            -100                       // Use automatic gain
 #define MODES_MAX_GAIN             999999                     // Use max available gain
