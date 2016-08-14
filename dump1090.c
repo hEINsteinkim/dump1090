@@ -82,6 +82,10 @@ void modesInitConfig(void) {
     Modes.interactive_display_ttl = MODES_INTERACTIVE_DISPLAY_TTL;
     Modes.fUserLat                = MODES_USER_LATITUDE_DFLT;
     Modes.fUserLon                = MODES_USER_LONGITUDE_DFLT;
+    Modes.dev_ID                  = MODES_DEV_RTLSDR;
+    Modes.enable_amp              = MODES_ENABLE_AMP;
+    Modes.lna_gain                = MODES_LNA_GAIN;
+    Modes.vga_gain                = MODES_VGA_GAIN;
 }
 //
 //=========================================================================
@@ -94,12 +98,14 @@ void modesInit(void) {
     pthread_cond_init(&Modes.data_cond,NULL);
 
     // Allocate the various buffers used by Modes
-    if ( ((Modes.icao_cache = (uint32_t *) malloc(sizeof(uint32_t) * MODES_ICAO_CACHE_LEN * 2)                  ) == NULL) ||
-         ((Modes.pFileData  = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE)                                         ) == NULL) ||
-         ((Modes.magnitude  = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE+MODES_PREAMBLE_SIZE+MODES_LONG_MSG_SIZE) ) == NULL) ||
-         ((Modes.maglut     = (uint16_t *) malloc(sizeof(uint16_t) * 256 * 256)                                 ) == NULL) ||
-         ((Modes.beastOut   = (char     *) malloc(MODES_RAWOUT_BUF_SIZE)                                        ) == NULL) ||
-         ((Modes.rawOut     = (char     *) malloc(MODES_RAWOUT_BUF_SIZE)                                        ) == NULL) ) 
+    if ( ((Modes.icao_cache         = (uint32_t *) malloc(sizeof(uint32_t) * MODES_ICAO_CACHE_LEN * 2)                  ) == NULL) ||
+         ((Modes.pFileData          = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE)                                         ) == NULL) ||
+         ((Modes.pHackrfData        = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE)                                         ) == NULL) ||
+         ((Modes.pHackrfTempBuffer  = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE)                                         ) == NULL) ||
+         ((Modes.magnitude          = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE+MODES_PREAMBLE_SIZE+MODES_LONG_MSG_SIZE) ) == NULL) ||
+         ((Modes.maglut             = (uint16_t *) malloc(sizeof(uint16_t) * 256 * 256)                                 ) == NULL) ||
+         ((Modes.beastOut           = (char     *) malloc(MODES_RAWOUT_BUF_SIZE)                                        ) == NULL) ||
+         ((Modes.rawOut             = (char     *) malloc(MODES_RAWOUT_BUF_SIZE)                                        ) == NULL) ) 
     {
         fprintf(stderr, "Out of memory allocating data buffer.\n");
         exit(1);
@@ -108,6 +114,8 @@ void modesInit(void) {
     // Clear the buffers that have just been allocated, just in-case
     memset(Modes.icao_cache, 0,   sizeof(uint32_t) * MODES_ICAO_CACHE_LEN * 2);
     memset(Modes.pFileData,127,   MODES_ASYNC_BUF_SIZE);
+    memset(Modes.pHackrfData,127,   MODES_ASYNC_BUF_SIZE);
+    memset(Modes.pHackrfTempBuffer,127,   MODES_ASYNC_BUF_SIZE);
     memset(Modes.magnitude,  0,   MODES_ASYNC_BUF_SIZE+MODES_PREAMBLE_SIZE+MODES_LONG_MSG_SIZE);
 
     // Validate the users Lat/Lon home location inputs
@@ -242,6 +250,47 @@ void modesInitRTLSDR(void) {
         rtlsdr_get_tuner_gain(Modes.dev)/10.0);
 }
 //
+// =============================== HackRF One handling ========================== 
+//
+int modesInitHackRF(void) {
+    #define HACKRF_STATUS(status, message) \
+        if (status != 0) { \
+            fprintf(stderr, "%s\n", message); \
+            hackrf_close(Modes.hackrf_dev); \
+            hackrf_exit(); \
+            return (1); \
+        } \
+
+    int status;
+
+    status = hackrf_init();
+    HACKRF_STATUS(status, "hackrf_init failed.");
+
+    status = hackrf_open(&Modes.hackrf_dev);
+    HACKRF_STATUS(status, "No HackRF compatible devices found.");
+
+    status = hackrf_set_freq(Modes.hackrf_dev, Modes.freq);
+    HACKRF_STATUS(status, "hackrf_set_freq failed.");
+
+    status = hackrf_set_sample_rate(Modes.hackrf_dev, MODES_DEFAULT_RATE);
+    HACKRF_STATUS(status, "hackrf_set_sample_rate failed.");
+
+    status = hackrf_set_amp_enable(Modes.hackrf_dev, Modes.enable_amp);
+    HACKRF_STATUS(status, "hackrf_set_amp_enable failed.");
+
+    status = hackrf_set_lna_gain(Modes.hackrf_dev, Modes.lna_gain);
+    HACKRF_STATUS(status, "hackrf_set_lna_gain failed.");
+
+    status = hackrf_set_vga_gain(Modes.hackrf_dev, Modes.vga_gain);
+    HACKRF_STATUS(status, "hackrf_set_vga_gain failed");
+
+    fprintf (stderr, "HackRF successfully initialized "
+                     "(AMP Enable: %i, LNA Gain: %i, VGA Gain: %i).\n",
+                     Modes.enable_amp, Modes.lna_gain, Modes.vga_gain);
+
+    return (0);
+}
+//
 //=========================================================================
 //
 // We use a thread reading data in background, while the main thread
@@ -255,6 +304,7 @@ void modesInitRTLSDR(void) {
 void rtlsdrCallback(unsigned char *buf, uint32_t len, void *ctx) {
 
     MODES_NOTUSED(ctx);
+    MODES_NOTUSED(len);
 
     // Lock the data buffer variables before accessing them
     pthread_mutex_lock(&Modes.data_mutex);
@@ -263,8 +313,6 @@ void rtlsdrCallback(unsigned char *buf, uint32_t len, void *ctx) {
 
     // Get the system time for this block
     ftime(&Modes.stSystemTimeRTL[Modes.iDataIn]);
-
-    if (len > MODES_ASYNC_BUF_SIZE) {len = MODES_ASYNC_BUF_SIZE;}
 
     // Queue the new data
     Modes.pData[Modes.iDataIn] = (uint16_t *) buf;
@@ -285,6 +333,74 @@ void rtlsdrCallback(unsigned char *buf, uint32_t len, void *ctx) {
     // Signal to the other thread that new data is ready, and unlock
     pthread_cond_signal(&Modes.data_cond);
     pthread_mutex_unlock(&Modes.data_mutex);
+}
+//
+//=========================================================================
+//
+// We use a thread reading data in background, while the main thread
+// handles decoding and visualization of data to the user.
+//
+// The reading thread calls the RTLSDR API to read data asynchronously, and
+// uses a callback to populate the data buffer.
+//
+// A Mutex is used to avoid races with the decoding thread.
+//
+int hackrfCallback(hackrf_transfer *transfer) {
+
+
+    // Lock the data buffer variables before accessing them
+    pthread_mutex_lock(&Modes.data_mutex);
+
+    Modes.iDataIn &= (MODES_ASYNC_BUF_NUMBER-1); // Just incase!!!
+
+    // Get the system time for this block
+    ftime(&Modes.stSystemTimeRTL[Modes.iDataIn]);
+
+    // Convert input data from HackRF
+    uint32_t len = transfer-> buffer_length;
+    for (uint32_t i = 0; i < len; i++) {
+        transfer->buffer[i] ^= (uint8_t)0x80;
+    }
+
+    uint32_t transfered=0;
+    while ((Modes.pHackrfTempBuffer_left+(len-transfered)) >= MODES_ASYNC_BUF_SIZE){ /*tempbuffer + transfer->buffer is full enough*/
+        
+        // copy from pHackrfTempBuffer + transfer-> to pHackrfData
+        //copy from temp.
+        if (Modes.pHackrfTempBuffer_left>0){
+            memcpy(Modes.pHackrfData,Modes.pHackrfTempBuffer,Modes.pHackrfTempBuffer_left);
+            memcpy(Modes.pHackrfData+Modes.pHackrfTempBuffer_left,transfer->buffer,MODES_ASYNC_BUF_SIZE-Modes.pHackrfTempBuffer_left);
+            transfered=MODES_ASYNC_BUF_SIZE-Modes.pHackrfTempBuffer_left;
+            Modes.pHackrfTempBuffer_left=0;
+        } else {
+            memcpy(Modes.pHackrfData,transfer->buffer+transfered,MODES_ASYNC_BUF_SIZE);
+            transfered+=MODES_ASYNC_BUF_SIZE;
+        }
+
+        // Queue the new data
+        Modes.pData[Modes.iDataIn] = Modes.pHackrfData; //TODO: increase to multiple buffers if needed
+        Modes.iDataIn    = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn + 1);
+        Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn - Modes.iDataOut);   
+
+        if (Modes.iDataReady == 0) {
+          // Ooooops. We've just received the MODES_ASYNC_BUF_NUMBER'th outstanding buffer
+          // This means that RTLSDR is currently overwriting the MODES_ASYNC_BUF_NUMBER+1
+          // buffer, but we havent yet processed it, so we're going to lose it. There
+          // isn't much we can do to recover the lost data, but we can correct things to
+          // avoid any additional problems.
+          Modes.iDataOut   = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataOut+1);
+          Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1);   
+          Modes.iDataLost++;
+        }
+    }
+    // copy rest to tempbuffer
+    Modes.pHackrfTempBuffer_left=len-transfered;
+    memcpy(Modes.pHackrfTempBuffer,transfer->buffer+transfered,Modes.pHackrfTempBuffer_left);
+
+    // Signal to the other thread that new data is ready, and unlock
+    pthread_cond_signal(&Modes.data_cond);
+    pthread_mutex_unlock(&Modes.data_mutex);
+    return (0);
 }
 //
 //=========================================================================
@@ -351,9 +467,19 @@ void *readerThreadEntryPoint(void *arg) {
     MODES_NOTUSED(arg);
 
     if (Modes.filename == NULL) {
-        rtlsdr_read_async(Modes.dev, rtlsdrCallback, NULL,
+        if (Modes.dev_ID == MODES_DEV_RTLSDR){
+            rtlsdr_read_async(Modes.dev, rtlsdrCallback, NULL,
                               MODES_ASYNC_BUF_NUMBER,
                               MODES_ASYNC_BUF_SIZE);
+        }else if (Modes.dev_ID == MODES_DEV_HACKRF){
+            int status = hackrf_start_rx(Modes.hackrf_dev, hackrfCallback, NULL);
+            if (status != 0) { 
+                fprintf(stderr, "hackrf_start_rx failed"); 
+                hackrf_close(Modes.hackrf_dev); 
+                hackrf_exit(); 
+                exit (1); 
+            }  
+        }
     } else {
         readDataFromFile();
     }
@@ -396,6 +522,7 @@ void showHelp(void) {
 "|                        dump1090 ModeS Receiver         Ver : " MODES_DUMP1090_VERSION " |\n"
 "-----------------------------------------------------------------------------\n"
 "--device-index <index>   Select RTL device (default: 0)\n"
+"--dev <index>            Select device type, 1=RTL-SDR, 2=HackRF (default: 1)\n"
 "--gain <db>              Set gain (default: max gain. Use -10 for auto-gain)\n"
 "--enable-agc             Enable the Automatic Gain Control (default: off)\n"
 "--freq <hz>              Set frequency (default: 1090 Mhz)\n"
@@ -673,6 +800,12 @@ int main(int argc, char **argv) {
 
         if (!strcmp(argv[j],"--device-index") && more) {
             Modes.dev_index = verbose_device_search(argv[++j]);
+        } else if (!strcmp(argv[j],"--dev") && more) {
+            char *f = argv[++j];
+            switch(*f) {
+                case '1': Modes.dev_ID = MODES_DEV_RTLSDR; break;
+                case '2': Modes.dev_ID = MODES_DEV_HACKRF; break;
+            }
         } else if (!strcmp(argv[j],"--gain") && more) {
             Modes.gain = (int) (atof(argv[++j])*10); // Gain is in tens of DBs
         } else if (!strcmp(argv[j],"--enable-agc")) {
@@ -803,7 +936,10 @@ int main(int argc, char **argv) {
     if (Modes.net_only) {
         fprintf(stderr,"Net-only mode, no RTL device or file open.\n");
     } else if (Modes.filename == NULL) {
-        modesInitRTLSDR();
+        if (Modes.dev_ID==MODES_DEV_RTLSDR)
+            modesInitRTLSDR();
+        if (Modes.dev_ID==MODES_DEV_HACKRF)
+            modesInitHackRF();
     } else {
         if (Modes.filename[0] == '-' && Modes.filename[1] == '\0') {
             Modes.fd = STDIN_FILENO;

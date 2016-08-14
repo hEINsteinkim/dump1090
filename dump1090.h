@@ -59,6 +59,7 @@
     #include <sys/ioctl.h>
     #include "rtl-sdr.h"
     #include "anet.h"
+    #include "libhackrf/hackrf.h"
 #else
     #include "winstubs.h" //Put everything Windows specific in here
     #include "rtl-sdr.h"
@@ -88,6 +89,9 @@
 #define MODES_ASYNC_BUF_SAMPLES    (MODES_ASYNC_BUF_SIZE / 2) // Each sample is 2 bytes
 #define MODES_AUTO_GAIN            -100                       // Use automatic gain
 #define MODES_MAX_GAIN             999999                     // Use max available gain
+#define MODES_ENABLE_AMP           0
+#define MODES_LNA_GAIN             32
+#define MODES_VGA_GAIN             48
 #define MODES_MSG_SQUELCH_LEVEL    0x02FF                     // Average signal strength limit
 #define MODES_MSG_ENCODER_ERRS     3                          // Maximum number of encoding errors
 
@@ -178,6 +182,10 @@
 #define MODES_NET_SNDBUF_SIZE (1024*64)
 #define MODES_NET_SNDBUF_MAX  (7)
 
+// Devices
+#define MODES_DEV_RTLSDR 1
+#define MODES_DEV_HACKRF 2
+
 #ifndef HTMLPATH
 #define HTMLPATH   "./public_html"      // default path for gmap.html etc
 #endif
@@ -263,9 +271,21 @@ struct {                             // Internal state
     int           dev_index;
     int           gain;
     int           enable_agc;
-    rtlsdr_dev_t *dev;
+    rtlsdr_dev_t  *dev;
+
+    // HackRF
+    hackrf_device *hackrf_dev;
+    uint16_t      *pHackrfData;
+    uint16_t      *pHackrfTempBuffer;
+    int           pHackrfTempBuffer_left;
+    int           enable_amp;
+    int           lna_gain;
+    int           vga_gain;
+
+    // SDR General
+    int           dev_ID;            //identifier of the selected device, MODES_DEV_HACKRF,MODES_DEV_RTLSDR
     int           freq;
-    int           ppm_error;
+    int           ppm_error;   
 
     // Networking
     char           aneterr[ANET_ERR_LEN];
